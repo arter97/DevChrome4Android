@@ -1,0 +1,20 @@
+Description: Enable the DevTools frontend on Android by default
+ Upstream ships the DevTools frontend on Android behind the
+ AndroidDevToolsFrontend feature. Enabling it adds "Developer tools" to the
+ app menu (TabbedAppMenuPropertiesDelegate#shouldShowDevToolsItem), the
+ Ctrl+Shift+I keyboard shortcut and "Inspect" in context menus. F12,
+ Ctrl+Shift+J and Ctrl+Shift+C are still NOT_IMPLEMENTED upstream.
+Author: Claude Opus 5.5 <noreply@anthropic.com>
+Forwarded: not-needed
+
+--- a/content/public/common/content_features.cc
++++ b/content/public/common/content_features.cc
+@@ -38,7 +38,7 @@ BASE_FEATURE(kAndroidCaptureKeyEvents, b
+ BASE_FEATURE(kAndroidCaretBrowsing, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+ // DevTools frontend for Android.
+-BASE_FEATURE(kAndroidDevToolsFrontend, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kAndroidDevToolsFrontend, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ // Enables media capturing to continue in the background.
+ BASE_FEATURE(kAndroidEnableBackgroundMediaCapturing,

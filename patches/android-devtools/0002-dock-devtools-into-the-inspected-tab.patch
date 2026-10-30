@@ -1,0 +1,315 @@
+Description: Dock DevTools into the inspected tab on Android
+ Upstream opens DevTools on Android as a separate tab ("Docking is not
+ supported yet"). This makes DevToolsWindow dockable on Android, like on
+ desktop: the DevTools frontend lays out itself and the inspected page for
+ every dock side (right/bottom/left) and reports the inspected page bounds
+ through SetInspectedPageBounds(), which also drives the device mode toolbar.
+ .
+ UpdateBrowserWindow() notifies the Java embedder (DevToolsDock.java), which
+ queries the docked frontend and the inspected contents bounds. Undocking
+ into a separate window is not supported, so the frontend is told so with the
+ noUndock URL parameter (allowlisted in SanitizeFrontendQueryParam()) and
+ docking is enforced in SetIsDocked().
+Author: Claude Opus 5.5 <noreply@anthropic.com>
+Forwarded: not-needed
+
+--- a/chrome/browser/devtools/android/BUILD.gn
++++ b/chrome/browser/devtools/android/BUILD.gn
+@@ -8,15 +8,19 @@ import("//third_party/jni_zero/jni_zero.
+ 
+ generate_jni("jni") {
+   sources = [
++    "java/src/org/chromium/chrome/browser/devtools/DevToolsDock.java",
+     "java/src/org/chromium/chrome/browser/devtools/DevToolsWindowAndroid.java",
+   ]
+ }
+ 
+ android_library("java") {
+   sources = [
++    "java/src/org/chromium/chrome/browser/devtools/DevToolsDock.java",
+     "java/src/org/chromium/chrome/browser/devtools/DevToolsWindowAndroid.java",
+   ]
+   deps = [
++    "//base:base_java",
++    "//build/android:build_java",
+     "//chrome/browser/profiles/android:java",
+     "//content/public/android:content_java",
+     "//third_party/jni_zero:jni_zero_java",
+--- /dev/null
++++ b/chrome/browser/devtools/android/java/src/org/chromium/chrome/browser/devtools/DevToolsDock.java
+@@ -0,0 +1,92 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++package org.chromium.chrome.browser.devtools;
++
++import android.graphics.Rect;
++
++import org.jni_zero.CalledByNative;
++import org.jni_zero.JniType;
++import org.jni_zero.NativeMethods;
++
++import org.chromium.base.ObserverList;
++import org.chromium.base.ThreadUtils;
++import org.chromium.build.annotations.NullMarked;
++import org.chromium.build.annotations.Nullable;
++import org.chromium.content_public.browser.WebContents;
++
++/**
++ * Exposes DevTools that are docked into an inspected tab to the Java UI, which lays out the
++ * DevTools frontend and the inspected contents within the tab's content area.
++ *
++ * <p>Like on desktop, the DevTools frontend covers the whole content area and the inspected
++ * contents are placed on top of it, at the bounds requested by the frontend. This allows the
++ * frontend to implement all dock sides as well as the device mode toolbar by itself.
++ */
++@NullMarked
++public final class DevToolsDock {
++    /** Observes changes of docked DevTools. */
++    public interface Observer {
++        /**
++         * Called when DevTools docked into {@code inspectedWebContents} were opened, closed or
++         * requested new bounds for the inspected contents.
++         */
++        void onDockedDevToolsChanged(WebContents inspectedWebContents);
++    }
++
++    private static final ObserverList<Observer> sObservers = new ObserverList<>();
++
++    private DevToolsDock() {}
++
++    public static void addObserver(Observer observer) {
++        ThreadUtils.assertOnUiThread();
++        sObservers.addObserver(observer);
++    }
++
++    public static void removeObserver(Observer observer) {
++        ThreadUtils.assertOnUiThread();
++        sObservers.removeObserver(observer);
++    }
++
++    /** Returns the DevTools frontend docked into {@code inspectedWebContents}, if any. */
++    public static @Nullable WebContents getDockedDevToolsWebContents(
++            WebContents inspectedWebContents) {
++        return DevToolsDockJni.get().getDockedDevToolsWebContents(inspectedWebContents);
++    }
++
++    /**
++     * Returns the bounds of the inspected contents within the DevTools container.
++     *
++     * @param inspectedWebContents The inspected {@link WebContents}.
++     * @param width The width of the DevTools container in px.
++     * @param height The height of the DevTools container in px.
++     * @param dipScale The device scale factor.
++     * @return The bounds in px relative to the container. Empty if the inspected contents should
++     *     be hidden.
++     */
++    public static Rect getInspectedContentsBounds(
++            WebContents inspectedWebContents, int width, int height, float dipScale) {
++        int[] bounds =
++                DevToolsDockJni.get()
++                        .getInspectedContentsBounds(inspectedWebContents, width, height, dipScale);
++        return new Rect(
++                bounds[0], bounds[1], bounds[0] + bounds[2], bounds[1] + bounds[3]);
++    }
++
++    @CalledByNative
++    private static void onDockedDevToolsChanged(WebContents inspectedWebContents) {
++        for (Observer observer : sObservers) {
++            observer.onDockedDevToolsChanged(inspectedWebContents);
++        }
++    }
++
++    @NativeMethods
++    interface Natives {
++        @Nullable WebContents getDockedDevToolsWebContents(WebContents inspectedWebContents);
++
++        @JniType("std::vector<int32_t>")
++        int[] getInspectedContentsBounds(
++                WebContents inspectedWebContents, int width, int height, float dipScale);
++    }
++}
+--- a/chrome/browser/devtools/BUILD.gn
++++ b/chrome/browser/devtools/BUILD.gn
+@@ -242,7 +242,10 @@ static_library("devtools") {
+       "protocol/target_handler_android.h",
+     ]
+ 
+-    deps += [ "//chrome/browser/ui/android/tab_model" ]
++    deps += [
++      "//chrome/browser/devtools/android:jni",
++      "//chrome/browser/ui/android/tab_model",
++    ]
+   } else {
+     public_deps += [
+       "//chrome/browser/ui:browser_list",
+--- a/chrome/browser/devtools/devtools_window_android.cc
++++ b/chrome/browser/devtools/devtools_window_android.cc
+@@ -4,8 +4,17 @@
+ 
+ #include "chrome/browser/devtools/devtools_window.h"
+ 
++#include <vector>
++
+ #include "base/notimplemented.h"
++#include "chrome/browser/devtools/android/jni/DevToolsDock_jni.h"
++#include "chrome/browser/devtools/devtools_contents_resizing_strategy.h"
+ #include "content/public/browser/keyboard_event_processing_result.h"
++#include "content/public/browser/web_contents.h"
++#include "third_party/jni_zero/jni_zero.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/rect_conversions.h"
++#include "ui/gfx/geometry/size_conversions.h"
+ 
+ using content::WebContents;
+ 
+@@ -33,5 +42,63 @@ void DevToolsWindow::UpdateBrowserToolba
+ }
+ 
+ void DevToolsWindow::UpdateBrowserWindow() {
+-  NOTIMPLEMENTED();
++  // Docked DevTools are laid out by the Java embedder (see DevToolsDock.java),
++  // which queries the current state through GetInTabWebContents().
++  WebContents* inspected_web_contents = GetInspectedWebContents();
++  if (!inspected_web_contents) {
++    return;
++  }
++  Java_DevToolsDock_onDockedDevToolsChanged(
++      jni_zero::AttachCurrentThread(),
++      inspected_web_contents->GetJavaWebContents());
++}
++
++static jni_zero::ScopedJavaLocalRef<jobject>
++JNI_DevToolsDock_GetDockedDevToolsWebContents(
++    JNIEnv* env,
++    const jni_zero::JavaRef<jobject>& java_inspected_web_contents) {
++  WebContents* inspected_web_contents =
++      WebContents::FromJavaWebContents(java_inspected_web_contents);
++  if (!inspected_web_contents) {
++    return nullptr;
++  }
++  WebContents* devtools_web_contents =
++      DevToolsWindow::GetInTabWebContents(inspected_web_contents, nullptr);
++  if (!devtools_web_contents ||
++      !DevToolsWindow::IsDevToolsWindow(devtools_web_contents)) {
++    return nullptr;
++  }
++  return devtools_web_contents->GetJavaWebContents();
+ }
++
++// Returns {x, y, width, height} of the inspected contents in physical pixels
++// within a DevTools container of |width| x |height| physical pixels. An empty
++// size means the inspected contents should be hidden.
++static std::vector<int32_t> JNI_DevToolsDock_GetInspectedContentsBounds(
++    JNIEnv* env,
++    const jni_zero::JavaRef<jobject>& java_inspected_web_contents,
++    int32_t width,
++    int32_t height,
++    float dip_scale) {
++  WebContents* inspected_web_contents =
++      WebContents::FromJavaWebContents(java_inspected_web_contents);
++  DevToolsContentsResizingStrategy strategy;
++  if (!inspected_web_contents ||
++      !DevToolsWindow::GetInTabWebContents(inspected_web_contents,
++                                           &strategy)) {
++    return {0, 0, width, height};
++  }
++
++  // The frontend reports the inspected page bounds in DIPs.
++  gfx::Rect container(
++      gfx::ScaleToFlooredSize(gfx::Size(width, height), 1.f / dip_scale));
++  gfx::Rect devtools_bounds;
++  gfx::Rect contents_bounds;
++  ApplyDevToolsContentsResizingStrategy(strategy, container, &devtools_bounds,
++                                        &contents_bounds);
++  gfx::Rect bounds = gfx::ScaleToRoundedRect(contents_bounds, dip_scale);
++  bounds.Intersect(gfx::Rect(width, height));
++  return {bounds.x(), bounds.y(), bounds.width(), bounds.height()};
++}
++
++DEFINE_JNI(DevToolsDock)
+--- a/chrome/browser/devtools/devtools_window.cc
++++ b/chrome/browser/devtools/devtools_window.cc
+@@ -1032,6 +1032,24 @@ void DevToolsWindow::Show(const DevTools
+   }
+ 
+ #if BUILDFLAG(IS_ANDROID)
++  if (is_docked_) {
++    DCHECK(can_dock_);
++    main_web_contents_->SetDelegate(this);
++    main_web_contents_->SetIgnoreZoomGestures(true);
++
++    // Lets the embedder lay out DevTools next to the inspected contents.
++    UpdateBrowserWindow();
++    main_web_contents_->SetInitialFocus();
++
++    PrefsTabHelper::CreateForWebContents(main_web_contents_);
++    OverrideAndSyncDevToolsRendererPrefs();
++
++    MaybeShowSharedProcessInfobar();
++
++    DoAction(action);
++    return;
++  }
++
+   if (TabModelList::models().empty()) {
+     return;
+   }
+@@ -1365,8 +1383,8 @@ DevToolsWindow* DevToolsWindow::Create(
+ 
+   SessionID inspected_browser_session_id = SessionID::InvalidValue();
+ #if BUILDFLAG(IS_ANDROID)
+-  // Docking is not supported yet.
+-  can_dock = false;
++  // DevTools docks into the area of the inspected tab, so there must be one.
++  can_dock = can_dock && inspected_web_contents;
+ #else
+   if (inspected_web_contents) {
+     // Check for a place to dock.
+@@ -1434,6 +1452,10 @@ GURL DevToolsWindow::GetDevToolsURL(Prof
+       url = kDefaultFrontendURL + remote_base + tab_target;
+       if (can_dock) {
+         url += "&can_dock=true";
++#if BUILDFLAG(IS_ANDROID)
++        // There are no separate DevTools windows on Android.
++        url += "&noUndock=true";
++#endif
+       }
+       if (!panel.empty()) {
+         url += "&panel=" + panel;
+@@ -1681,7 +1703,9 @@ void DevToolsWindow::ActivateWindow() {
+     return;
+   }
+ #if BUILDFLAG(IS_ANDROID)
+-  NOTIMPLEMENTED();
++  if (is_docked_) {
++    main_web_contents_->Focus();
++  }
+ #else
+   if (is_docked_ && GetInspectedBrowserWindow()) {
+     main_web_contents_->Focus();
+@@ -1739,6 +1763,12 @@ void DevToolsWindow::SetIsDocked(bool do
+   if (!can_dock_) {
+     dock_requested = false;
+   }
++#if BUILDFLAG(IS_ANDROID)
++  // Undocking into a separate window is not supported on Android.
++  if (can_dock_) {
++    dock_requested = true;
++  }
++#endif
+ 
+   bool was_docked = is_docked_;
+   is_docked_ = dock_requested;
+--- a/chrome/browser/devtools/devtools_ui_bindings.cc
++++ b/chrome/browser/devtools/devtools_ui_bindings.cc
+@@ -414,7 +414,7 @@ std::string SanitizeFrontendQueryParam(c
+   if (key == "can_dock" || key == "debugFrontend" || key == "isSharedWorker" ||
+       key == "v8only" || key == "remoteFrontend" || key == "nodeFrontend" ||
+       key == "hasOtherClients" || key == "uiDevTools" ||
+-      key == "browserConnection") {
++      key == "browserConnection" || key == "noUndock") {
+     return "true";
+   }
+ 

@@ -1,0 +1,123 @@
+Description: DevTools frontend: support embedders without undocking
+ Adds a noUndock URL parameter which removes the "Undock into
+ separate window" dock side from the main menu and from the dock side
+ toggling cycle (Ctrl+Shift+D).
+Author: Claude Opus 5.5 <noreply@anthropic.com>
+Forwarded: not-needed
+
+--- a/third_party/devtools-frontend/src/front_end/entrypoints/main/MainImpl.ts
++++ b/third_party/devtools-frontend/src/front_end/entrypoints/main/MainImpl.ts
+@@ -464,7 +464,8 @@ export class MainImpl {
+       hideIssueSetting: IssuesManager.IssuesManager.getHideIssueByCodeSetting(),
+     });
+ 
+-    UI.DockController.DockController.instance({forceNew: true, canDock});
++    const canUndock = !Root.Runtime.Runtime.queryParam('noUndock');
++    UI.DockController.DockController.instance({forceNew: true, canDock, canUndock});
+     SDK.DOMDebuggerModel.DOMDebuggerManager.instance({forceNew: true});
+     const targetManager = SDK.TargetManager.TargetManager.instance();
+     targetManager.addEventListener(
+@@ -874,7 +875,7 @@ export class MainMenuItem implements UI.
+           ${i18nString(UIStrings.dockSide)}
+         </span>
+         <devtools-toolbar @mousedown=${(event: Event) => event.consume()}>
+-          <devtools-button class="toolbar-button"
++          ${dockController.canUndock() ? html`<devtools-button class="toolbar-button"
+                            jslog=${VisualLogging.toggle().track({click: true}).context('current-dock-state-undock')}
+                            title=${i18nString(UIStrings.undockIntoSeparateWindow)}
+                            aria-label=${i18nString(UIStrings.undockIntoSeparateWindow)}
+@@ -883,7 +884,7 @@ export class MainMenuItem implements UI.
+                            .toggledIconName=${'dock-window'}
+                            .toggleType=${Buttons.Button.ToggleType.PRIMARY}
+                            .variant=${Buttons.Button.Variant.ICON_TOGGLE}
+-                           @click=${setDockSide.bind(null, UI.DockController.DockState.UNDOCKED)}></devtools-button>
++                           @click=${setDockSide.bind(null, UI.DockController.DockState.UNDOCKED)}></devtools-button>` : ''}
+           <devtools-button class="toolbar-button"
+                            jslog=${VisualLogging.toggle().track({click: true}).context('current-dock-state-left')}
+                            title=${i18nString(UIStrings.dockToLeft)}
+--- a/third_party/devtools-frontend/src/front_end/ui/legacy/DockController.ts
++++ b/third_party/devtools-frontend/src/front_end/ui/legacy/DockController.ts
+@@ -33,14 +33,19 @@ let dockControllerInstance: DockControll
+ 
+ export class DockController extends Common.ObjectWrapper.ObjectWrapper<EventTypes> {
+   #canDock: boolean;
++  #canUndock: boolean;
++  /** The dock states the embedder supports, in toggling order. */
++  readonly #states: DockState[];
+   readonly closeButton: ToolbarButton;
+   private readonly currentDockStateSetting: Common.Settings.Setting<DockState>;
+   private readonly lastDockStateSetting: Common.Settings.Setting<DockState>;
+   #dockSide: DockState|undefined = undefined;
+ 
+-  constructor(canDock: boolean) {
++  constructor(canDock: boolean, canUndock = true) {
+     super();
+     this.#canDock = canDock;
++    this.#canUndock = canUndock;
++    this.#states = canUndock ? states : states.filter(state => state !== DockState.UNDOCKED);
+ 
+     this.closeButton = new ToolbarButton(i18nString(UIStrings.close), 'cross');
+     this.closeButton.element.setAttribute('jslog', `${VisualLogging.close().track({click: true})}`);
+@@ -60,10 +65,10 @@ export class DockController extends Comm
+     }
+ 
+     this.currentDockStateSetting.addChangeListener(this.dockSideChanged, this);
+-    if (states.indexOf(this.currentDockStateSetting.get()) === -1) {
++    if (this.#states.indexOf(this.currentDockStateSetting.get()) === -1) {
+       this.currentDockStateSetting.set(DockState.RIGHT);
+     }
+-    if (states.indexOf(this.lastDockStateSetting.get()) === -1) {
++    if (this.#states.indexOf(this.lastDockStateSetting.get()) === -1) {
+       this.currentDockStateSetting.set(DockState.BOTTOM);
+     }
+   }
+@@ -71,10 +76,11 @@ export class DockController extends Comm
+   static instance(opts: {
+     forceNew: boolean|null,
+     canDock: boolean,
++    canUndock?: boolean,
+   } = {forceNew: null, canDock: false}): DockController {
+-    const {forceNew, canDock} = opts;
++    const {forceNew, canDock, canUndock} = opts;
+     if (!dockControllerInstance || forceNew) {
+-      dockControllerInstance = new DockController(canDock);
++      dockControllerInstance = new DockController(canDock, canUndock);
+     }
+ 
+     return dockControllerInstance;
+@@ -106,14 +112,22 @@ export class DockController extends Comm
+     return this.#canDock;
+   }
+ 
++  /**
++   * Whether docked DevTools can be undocked into a separate window. Embedders without separate
++   * windows (e.g. Chrome on Android) opt out via `Root.Runtime.Runtime.queryParam('noUndock')`.
++   */
++  canUndock(): boolean {
++    return this.#canUndock;
++  }
++
+   isVertical(): boolean {
+     return this.#dockSide === DockState.RIGHT || this.#dockSide === DockState.LEFT;
+   }
+ 
+   setDockSide(dockSide: DockState): void {
+-    if (states.indexOf(dockSide) === -1) {
++    if (this.#states.indexOf(dockSide) === -1) {
+       // If the side is invalid, default to a valid one
+-      dockSide = states[0];
++      dockSide = this.#states[0];
+     }
+ 
+     if (this.#dockSide === dockSide) {
+@@ -147,8 +161,8 @@ export class DockController extends Comm
+ 
+   toggleDockSide(): void {
+     if (this.lastDockStateSetting.get() === this.currentDockStateSetting.get()) {
+-      const index = states.indexOf(this.currentDockStateSetting.get()) || 0;
+-      this.lastDockStateSetting.set(states[(index + 1) % states.length]);
++      const index = this.#states.indexOf(this.currentDockStateSetting.get()) || 0;
++      this.lastDockStateSetting.set(this.#states[(index + 1) % this.#states.length]);
+     }
+     this.setDockSide(this.lastDockStateSetting.get());
+   }

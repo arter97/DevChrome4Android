@@ -1,0 +1,34 @@
+Description: Show "Developer tools" in the app menu
+ Upstream only lists "Developer tools" in the "More tools" submenu, which
+ requires the SubmenusInAppMenu feature. Like "Reader mode", show it as a
+ top-level app menu item when submenus are disabled, and on all form factors
+ instead of only on tablets.
+Author: Claude Opus 5.5 <noreply@anthropic.com>
+Forwarded: not-needed
+
+--- a/chrome/android/java/src/org/chromium/chrome/browser/tabbed_mode/TabbedAppMenuPropertiesDelegate.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/tabbed_mode/TabbedAppMenuPropertiesDelegate.java
+@@ -418,6 +418,12 @@ public class TabbedAppMenuPropertiesDele
+             modelList.add(buildReaderModeItem(currentTab));
+         }
+ 
++        // Developer tools
++        if (!ChromeFeatureList.isEnabled(ChromeFeatureList.SUBMENUS_IN_APP_MENU)
++                && shouldShowDevToolsItem(currentTab)) {
++            modelList.add(buildDevToolsItem(currentTab));
++        }
++
+         // Open with ...
+         if (shouldShowOpenWithItem(currentTab)) {
+             modelList.add(buildOpenWithItem(currentTab, shouldShowIconBeforeItem()));
+@@ -1029,10 +1035,6 @@ public class TabbedAppMenuPropertiesDele
+             return false;
+         }
+ 
+-        if (!DeviceFormFactor.isNonMultiDisplayContextOnTablet(mContext)) {
+-            return false;
+-        }
+-
+         if (currentTab == null || currentTab.isNativePage()) {
+             return false;
+         }

@@ -1,0 +1,7 @@
+# Official (optimized) build: ThinLTO, PGO and orderfile, resource allowlist.
+is_official_build = true
+
+# PGO uses //chrome/android/orderfiles/arm64/pgo_profile.arm64.profdata by
+# default. Its matching orderfile (both fetched by scripts/android_deps.py) is
+# only picked automatically with Google's internal tree, so set it here.
+chrome_orderfile_path = "//chrome/android/orderfiles/arm64/orderfile.arm64.out"

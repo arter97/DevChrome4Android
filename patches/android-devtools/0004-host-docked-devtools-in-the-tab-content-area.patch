@@ -1,0 +1,743 @@
+Description: Host docked DevTools in the tab's content area on Android
+ The docked DevTools WebContents covers the content area of the tab and the
+ tab's contents are drawn on top of it, resized and moved to the bounds the
+ frontend requested, like the desktop's DevToolsWebView/ContentsLayoutManager:
+ .
+  * StaticTabSceneLayer draws the DevTools layer behind the clipped and
+    offset tab contents.
+  * DockedDevToolsHost places the DevTools ContentView over the content area
+    for input/IME, letting input over the inspected contents pass through to
+    the tab, and pins the browser controls while docked.
+  * CompositorViewHolder sizes the tab's WebContents to the inspected bounds
+    and offsets touch events accordingly.
+Author: Claude Opus 5.5 <noreply@anthropic.com>
+Forwarded: not-needed
+
+--- a/chrome/android/chrome_java_sources.gni
++++ b/chrome/android/chrome_java_sources.gni
+@@ -307,6 +307,7 @@ chrome_java_sources = [
+   "java/src/org/chromium/chrome/browser/compositor/CompositorSurfaceManagerImpl.java",
+   "java/src/org/chromium/chrome/browser/compositor/CompositorView.java",
+   "java/src/org/chromium/chrome/browser/compositor/CompositorViewHolder.java",
++  "java/src/org/chromium/chrome/browser/compositor/DockedDevToolsHost.java",
+   "java/src/org/chromium/chrome/browser/compositor/LayerTitleCache.java",
+   "java/src/org/chromium/chrome/browser/compositor/layouts/Layout.java",
+   "java/src/org/chromium/chrome/browser/compositor/layouts/LayoutManagerChrome.java",
+--- a/chrome/android/java/src/org/chromium/chrome/browser/compositor/CompositorViewHolder.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/compositor/CompositorViewHolder.java
+@@ -202,6 +202,7 @@ public class CompositorViewHolder extend
+ 
+     /** The currently attached View. */
+     private @Nullable View mView;
++    private @Nullable DockedDevToolsHost mDockedDevToolsHost;
+ 
+     /** The index of the {@link VirtualView} that has keyboard focus. */
+     private int mKeyboardFocusIndex;
+@@ -277,13 +278,21 @@ public class CompositorViewHolder extend
+                         @Override
+                         public float getLeft() {
+                             updateCacheViewport();
+-                            return mCacheViewport.left;
++                            float left = mCacheViewport.left;
++                            if (mDockedDevToolsHost != null) {
++                                left += mDockedDevToolsHost.getInspectedContentsOffsetX();
++                            }
++                            return left;
+                         }
+ 
+                         @Override
+                         public float getTop() {
+                             updateCacheViewport();
+-                            return mCacheViewport.top;
++                            float top = mCacheViewport.top;
++                            if (mDockedDevToolsHost != null) {
++                                top += mDockedDevToolsHost.getInspectedContentsOffsetY();
++                            }
++                            return top;
+                         }
+ 
+                         @Override
+@@ -712,6 +721,10 @@ public class CompositorViewHolder extend
+         }
+ 
+         setTab(null);
++        if (mDockedDevToolsHost != null) {
++            mDockedDevToolsHost.destroy();
++            mDockedDevToolsHost = null;
++        }
+         if (mApplicationBottomInsetSupplier != null) {
+             assert mOnViewportInsetsChanged != null;
+             mApplicationBottomInsetSupplier.getSupplier().removeObserver(mOnViewportInsetsChanged);
+@@ -737,6 +750,11 @@ public class CompositorViewHolder extend
+         mActivity = assumeNonNull(windowAndroid.getActivity().get());
+         mCompositorView.initNativeCompositor(windowAndroid, tabContentManager);
+ 
++        mDockedDevToolsHost = new DockedDevToolsHost(this, windowAndroid);
++        mDockedDevToolsHost.setBrowserControlsManager(mBrowserControlsManager);
++        // Docked DevTools take input above the tab's view.
++        addView(mDockedDevToolsHost.getContainerView());
++
+         if (mControlContainer != null) {
+             mCompositorView
+                     .getResourceManager()
+@@ -1047,7 +1065,19 @@ public class CompositorViewHolder extend
+         int verticalViewportInsets = controlsInsets + keyboardInset;
+ 
+         if (isAttachedToWindow(view)) {
+-            webContents.setSize(width - horizontalViewportInsets, height - verticalViewportInsets);
++            int contentWidth = width - horizontalViewportInsets;
++            int contentHeight = height - verticalViewportInsets;
++            // DevTools docked into the tab take over the content area and request the bounds of
++            // the inspected contents within it.
++            Rect inspectedBounds =
++                    mDockedDevToolsHost != null && tab == getCurrentTab()
++                            ? mDockedDevToolsHost.layout(webContents, contentWidth, contentHeight)
++                            : null;
++            if (inspectedBounds != null && !inspectedBounds.isEmpty()) {
++                contentWidth = inspectedBounds.width();
++                contentHeight = inspectedBounds.height();
++            }
++            webContents.setSize(contentWidth, contentHeight);
+ 
+             // Dispatch the geometrychange JavaScript event to the page.
+             // TODO(bokan): This doesn't belong in updateWebContentsSize. Ideally the content/ layer
+@@ -1466,9 +1496,19 @@ public class CompositorViewHolder extend
+             mContentOverlayVisiblity = show;
+             mCanBeFocusable = canBeFocusable;
+             updateContentOverlayVisibility(mContentOverlayVisiblity);
++            onDockedDevToolsChanged();
+         }
+     }
+ 
++    /** Called when DevTools docked into the current tab may have changed. */
++    void onDockedDevToolsChanged() {
++        if (mDockedDevToolsHost == null) return;
++        Tab tab = getCurrentTab();
++        mDockedDevToolsHost.update(mContentOverlayVisiblity ? tab : null);
++        updateWebContentsSize(tab);
++        requestRender();
++    }
++
+     @Override
+     public LayoutRenderHost getLayoutRenderHost() {
+         return this;
+@@ -1513,6 +1553,7 @@ public class CompositorViewHolder extend
+     public void setBrowserControlsManager(BrowserControlsManager manager) {
+         mBrowserControlsManager = manager;
+         mBrowserControlsManager.addObserver(this);
++        if (mDockedDevToolsHost != null) mDockedDevToolsHost.setBrowserControlsManager(manager);
+         onViewportChanged();
+     }
+ 
+@@ -1736,6 +1777,7 @@ public class CompositorViewHolder extend
+         updateContentOverlayVisibility(mContentOverlayVisiblity);
+ 
+         if (mTabVisible != null) initializeTab(mTabVisible);
++        onDockedDevToolsChanged();
+ 
+         if (mOnscreenContentProvider == null) {
+             mOnscreenContentProvider =
+--- /dev/null
++++ b/chrome/android/java/src/org/chromium/chrome/browser/compositor/DockedDevToolsHost.java
+@@ -0,0 +1,285 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++package org.chromium.chrome.browser.compositor;
++
++import android.content.Context;
++import android.graphics.Rect;
++import android.graphics.RectF;
++import android.view.InputDevice;
++import android.view.MotionEvent;
++import android.view.View;
++import android.widget.FrameLayout;
++
++import org.chromium.base.version_info.VersionInfo;
++import org.chromium.build.annotations.NullMarked;
++import org.chromium.build.annotations.Nullable;
++import org.chromium.chrome.browser.compositor.layouts.LayoutManagerImpl;
++import org.chromium.chrome.browser.devtools.DevToolsDock;
++import org.chromium.chrome.browser.fullscreen.BrowserControlsManager;
++import org.chromium.chrome.browser.tab.Tab;
++import org.chromium.components.embedder_support.view.ContentView;
++import org.chromium.content_public.browser.Visibility;
++import org.chromium.content_public.browser.WebContents;
++import org.chromium.ui.base.ViewAndroidDelegate;
++import org.chromium.ui.base.WindowAndroid;
++import org.chromium.ui.util.TokenHolder;
++
++import java.util.Map;
++import java.util.WeakHashMap;
++
++/**
++ * Hosts the DevTools frontend docked into the current tab of a {@link CompositorViewHolder}.
++ *
++ * <p>Like on desktop, the DevTools {@link WebContents} covers the content area of the tab and the
++ * inspected contents are placed on top of it, at the bounds requested by the DevTools frontend. The
++ * compositor draws the DevTools frontend behind the tab (see StaticTabSceneLayer), while input is
++ * routed to the frontend through a {@link ContentView} placed over the content area that lets input
++ * over the inspected contents pass through to the tab.
++ */
++@NullMarked
++class DockedDevToolsHost implements DevToolsDock.Observer {
++    private final CompositorViewHolder mHolder;
++    private final WindowAndroid mWindowAndroid;
++    private final Container mContainer;
++    // ContentViews of DevTools frontends, kept while the inspected tab is in the background.
++    private final Map<WebContents, ContentView> mContentViews = new WeakHashMap<>();
++    private final RectF mCacheViewport = new RectF();
++
++    private @Nullable WebContents mInspectedWebContents;
++    private @Nullable WebContents mDevToolsWebContents;
++    private @Nullable ContentView mDevToolsContentView;
++    private @Nullable BrowserControlsManager mBrowserControlsManager;
++    private int mBrowserControlsToken = TokenHolder.INVALID_TOKEN;
++
++    /** Bounds of the inspected contents relative to the DevTools content view. */
++    private final Rect mInspectedBounds = new Rect();
++
++    /**
++     * Holds the DevTools {@link ContentView} and lets input outside of it, or over the inspected
++     * contents, pass through to the views below (i.e. the tab).
++     */
++    private class Container extends FrameLayout {
++        private boolean mPassingThroughTouch;
++
++        Container(Context context) {
++            super(context);
++        }
++
++        private boolean shouldPassThrough(MotionEvent e) {
++            View view = mDevToolsContentView;
++            if (view == null) return true;
++            int x = (int) e.getX() - view.getLeft();
++            int y = (int) e.getY() - view.getTop();
++            if (x < 0 || y < 0 || x >= view.getWidth() || y >= view.getHeight()) return true;
++            return mInspectedBounds.contains(x, y);
++        }
++
++        @Override
++        public boolean dispatchTouchEvent(MotionEvent e) {
++            if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
++                mPassingThroughTouch = shouldPassThrough(e);
++                View focusTarget = mPassingThroughTouch ? mHolder.getContentView() : null;
++                if (!mPassingThroughTouch) focusTarget = mDevToolsContentView;
++                if (focusTarget != null && !focusTarget.hasFocus()) focusTarget.requestFocus();
++            }
++            if (mPassingThroughTouch) return false;
++            return super.dispatchTouchEvent(e);
++        }
++
++        @Override
++        public boolean dispatchGenericMotionEvent(MotionEvent e) {
++            if (e.isFromSource(InputDevice.SOURCE_CLASS_POINTER) && shouldPassThrough(e)) {
++                return false;
++            }
++            return super.dispatchGenericMotionEvent(e);
++        }
++
++        @Override
++        protected boolean dispatchHoverEvent(MotionEvent e) {
++            if (shouldPassThrough(e)) return false;
++            return super.dispatchHoverEvent(e);
++        }
++    }
++
++    DockedDevToolsHost(CompositorViewHolder holder, WindowAndroid windowAndroid) {
++        mHolder = holder;
++        mWindowAndroid = windowAndroid;
++        mContainer = new Container(holder.getContext());
++        mContainer.setVisibility(View.GONE);
++        DevToolsDock.addObserver(this);
++    }
++
++    void setBrowserControlsManager(@Nullable BrowserControlsManager manager) {
++        releaseBrowserControls();
++        mBrowserControlsManager = manager;
++        if (mDevToolsWebContents != null) pinBrowserControls();
++    }
++
++    void destroy() {
++        DevToolsDock.removeObserver(this);
++        setDockedDevTools(null, null);
++        mContentViews.clear();
++    }
++
++    /** The container that has to be added on top of the tab's view. */
++    View getContainerView() {
++        return mContainer;
++    }
++
++    /** Returns the offset of the inspected contents relative to the content area. */
++    int getInspectedContentsOffsetX() {
++        return mDevToolsWebContents != null ? mInspectedBounds.left : 0;
++    }
++
++    /** Returns the offset of the inspected contents relative to the content area. */
++    int getInspectedContentsOffsetY() {
++        return mDevToolsWebContents != null ? mInspectedBounds.top : 0;
++    }
++
++    /**
++     * Shows the DevTools docked into the given tab, if any, and hides any other docked DevTools.
++     *
++     * @param tab The tab currently shown in the content area, or null if no tab is shown.
++     * @return Whether the docked DevTools changed.
++     */
++    boolean update(@Nullable Tab tab) {
++        WebContents inspectedWebContents = tab != null ? tab.getWebContents() : null;
++        WebContents devToolsWebContents = null;
++        if (inspectedWebContents != null && !inspectedWebContents.isDestroyed()) {
++            devToolsWebContents = DevToolsDock.getDockedDevToolsWebContents(inspectedWebContents);
++        }
++        if (devToolsWebContents == null) inspectedWebContents = null;
++        if (inspectedWebContents == mInspectedWebContents
++                && devToolsWebContents == mDevToolsWebContents) {
++            return false;
++        }
++        setDockedDevTools(inspectedWebContents, devToolsWebContents);
++        return true;
++    }
++
++    private void setDockedDevTools(
++            @Nullable WebContents inspectedWebContents,
++            @Nullable WebContents devToolsWebContents) {
++        if (mDevToolsWebContents != null) {
++            if (mDevToolsContentView != null) mContainer.removeView(mDevToolsContentView);
++            if (!mDevToolsWebContents.isDestroyed()) {
++                mDevToolsWebContents.updateWebContentsVisibility(Visibility.HIDDEN);
++            }
++            releaseBrowserControls();
++        }
++
++        mInspectedWebContents = inspectedWebContents;
++        mDevToolsWebContents = devToolsWebContents;
++        mDevToolsContentView = null;
++        mInspectedBounds.setEmpty();
++
++        LayoutManagerImpl layoutManager = mHolder.getLayoutManager();
++        if (devToolsWebContents == null) {
++            mContainer.setVisibility(View.GONE);
++            if (layoutManager != null) layoutManager.setDockedDevTools(null, null);
++            return;
++        }
++
++        ContentView contentView = mContentViews.get(devToolsWebContents);
++        if (contentView == null) {
++            contentView = ContentView.createContentView(mHolder.getContext(), devToolsWebContents);
++            devToolsWebContents.setDelegates(
++                    VersionInfo.getProductVersion(),
++                    ViewAndroidDelegate.createBasicDelegate(contentView),
++                    contentView,
++                    mWindowAndroid,
++                    WebContents.createDefaultInternalsHolder());
++            mContentViews.put(devToolsWebContents, contentView);
++        }
++        mDevToolsContentView = contentView;
++        mContainer.addView(
++                contentView,
++                new FrameLayout.LayoutParams(
++                        FrameLayout.LayoutParams.MATCH_PARENT,
++                        FrameLayout.LayoutParams.MATCH_PARENT));
++        mContainer.setVisibility(View.VISIBLE);
++        devToolsWebContents.updateWebContentsVisibility(Visibility.VISIBLE);
++        // Keep the content area still while DevTools are docked into it.
++        pinBrowserControls();
++    }
++
++    /**
++     * Lays out the docked DevTools of the given tab's contents within the content area.
++     *
++     * @param inspectedWebContents The {@link WebContents} of the tab being laid out.
++     * @param width The width of the content area in px.
++     * @param height The height of the content area in px.
++     * @return The bounds of the inspected contents relative to the content area, or null if no
++     *     DevTools are docked into {@code inspectedWebContents}.
++     */
++    @Nullable Rect layout(WebContents inspectedWebContents, int width, int height) {
++        WebContents devToolsWebContents = mDevToolsWebContents;
++        ContentView contentView = mDevToolsContentView;
++        if (devToolsWebContents == null
++                || contentView == null
++                || inspectedWebContents != mInspectedWebContents
++                || devToolsWebContents.isDestroyed()) {
++            return null;
++        }
++
++        // The DevTools frontend covers the whole content area.
++        mHolder.getVisibleViewport(mCacheViewport);
++        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) contentView.getLayoutParams();
++        int left = Math.round(mCacheViewport.left);
++        int top = Math.round(mCacheViewport.top);
++        if (params.width != width
++                || params.height != height
++                || params.leftMargin != left
++                || params.topMargin != top) {
++            params.width = width;
++            params.height = height;
++            params.leftMargin = left;
++            params.topMargin = top;
++            contentView.setLayoutParams(params);
++        }
++        mHolder.getCompositorView()
++                .onPhysicalBackingSizeChanged(devToolsWebContents, width, height);
++        devToolsWebContents.setSize(width, height);
++
++        float dipScale = mWindowAndroid.getDisplay().getDipScale();
++        Rect bounds =
++                DevToolsDock.getInspectedContentsBounds(
++                        inspectedWebContents, width, height, dipScale);
++        mInspectedBounds.set(bounds);
++
++        LayoutManagerImpl layoutManager = mHolder.getLayoutManager();
++        if (layoutManager != null) {
++            layoutManager.setDockedDevTools(devToolsWebContents, new Rect(bounds));
++        }
++        return bounds;
++    }
++
++    private void pinBrowserControls() {
++        if (mBrowserControlsManager == null) return;
++        mBrowserControlsToken =
++                mBrowserControlsManager
++                        .getBrowserVisibilityDelegate()
++                        .showControlsPersistentAndClearOldToken(mBrowserControlsToken);
++    }
++
++    private void releaseBrowserControls() {
++        if (mBrowserControlsManager == null) return;
++        mBrowserControlsManager
++                .getBrowserVisibilityDelegate()
++                .releasePersistentShowingToken(mBrowserControlsToken);
++        mBrowserControlsToken = TokenHolder.INVALID_TOKEN;
++    }
++
++    // DevToolsDock.Observer implementation.
++
++    @Override
++    public void onDockedDevToolsChanged(WebContents inspectedWebContents) {
++        WebContents current = mHolder.getWebContents();
++        if (inspectedWebContents != current && inspectedWebContents != mInspectedWebContents) {
++            return;
++        }
++        mHolder.onDockedDevToolsChanged();
++    }
++}
+--- a/chrome/android/java/src/org/chromium/chrome/browser/compositor/layouts/components/LayoutTab.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/compositor/layouts/components/LayoutTab.java
+@@ -7,10 +7,12 @@ package org.chromium.chrome.browser.comp
+ import android.content.Context;
+ import android.content.res.Resources;
+ import android.graphics.Color;
++import android.graphics.Rect;
+ 
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.cc.input.OffsetTag;
+ import org.chromium.chrome.browser.tab.Tab;
++import org.chromium.content_public.browser.WebContents;
+ import org.chromium.ui.modelutil.PropertyKey;
+ import org.chromium.ui.modelutil.PropertyModel;
+ 
+@@ -118,6 +120,17 @@ public class LayoutTab extends PropertyM
+     public static final PropertyModel.WritableObjectPropertyKey<OffsetTag> CONTENT_OFFSET_TAG =
+             new WritableObjectPropertyKey<>();
+ 
++    /** The DevTools frontend docked into the tab. It is drawn behind the tab's contents. */
++    public static final PropertyModel.WritableObjectPropertyKey<WebContents>
++            DOCKED_DEVTOOLS_WEB_CONTENTS = new WritableObjectPropertyKey<>();
++
++    /**
++     * The bounds of the tab's contents within the docked DevTools frontend, relative to the
++     * content offset. An empty rect hides the tab's contents.
++     */
++    public static final PropertyModel.WritableObjectPropertyKey<Rect>
++            DOCKED_DEVTOOLS_INSPECTED_BOUNDS = new WritableObjectPropertyKey<>();
++
+     public static final PropertyKey[] ALL_KEYS =
+             new PropertyKey[] {
+                 TAB_ID,
+@@ -147,7 +160,9 @@ public class LayoutTab extends PropertyM
+                 CONTENT_OFFSET_X,
+                 CONTENT_OFFSET_Y,
+                 IS_ACTIVE_LAYOUT,
+-                CONTENT_OFFSET_TAG
++                CONTENT_OFFSET_TAG,
++                DOCKED_DEVTOOLS_WEB_CONTENTS,
++                DOCKED_DEVTOOLS_INSPECTED_BOUNDS
+             };
+ 
+     /**
+--- a/chrome/android/java/src/org/chromium/chrome/browser/compositor/layouts/LayoutManagerImpl.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/compositor/layouts/LayoutManagerImpl.java
+@@ -9,6 +9,7 @@ import static org.chromium.build.NullUti
+ 
+ import android.content.Context;
+ import android.graphics.PointF;
++import android.graphics.Rect;
+ import android.graphics.RectF;
+ import android.os.SystemClock;
+ import android.util.SparseArray;
+@@ -77,6 +78,7 @@ import org.chromium.chrome.browser.ui.ed
+ import org.chromium.components.browser_ui.widget.gesture.BackPressHandler;
+ import org.chromium.components.browser_ui.widget.gesture.SwipeGestureListener.SwipeHandler;
+ import org.chromium.components.embedder_support.util.UrlConstants;
++import org.chromium.content_public.browser.WebContents;
+ import org.chromium.ui.base.LocalizationUtils;
+ import org.chromium.ui.base.SPenSupport;
+ import org.chromium.ui.modelutil.PropertyKey;
+@@ -898,6 +900,17 @@ public class LayoutManagerImpl
+     }
+ 
+     /**
++     * Sets the DevTools docked into the current tab of the static layout.
++     *
++     * @param devToolsWebContents The docked DevTools frontend, or null.
++     * @param inspectedBounds The bounds of the tab's contents within the DevTools frontend.
++     */
++    public void setDockedDevTools(
++            @Nullable WebContents devToolsWebContents, @Nullable Rect inspectedBounds) {
++        mStaticLayout.setDockedDevTools(devToolsWebContents, inspectedBounds);
++    }
++
++    /**
+      * @return The default {@link Layout} to show when {@link Layout}s get hidden and the next
+      *     {@link Layout} to show isn't known.
+      */
+--- a/chrome/android/java/src/org/chromium/chrome/browser/compositor/layouts/StaticLayout.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/compositor/layouts/StaticLayout.java
+@@ -8,6 +8,7 @@ import static org.chromium.build.NullUti
+ 
+ import android.content.Context;
+ import android.content.res.Resources;
++import android.graphics.Rect;
+ import android.graphics.RectF;
+ 
+ import androidx.annotation.Px;
+@@ -517,6 +518,18 @@ public class StaticLayout extends Layout
+         mModel.set(LayoutTab.CONTENT_OFFSET_X, contentOffsetX);
+     }
+ 
++    /**
++     * Sets the DevTools docked into the current tab.
++     *
++     * @param devToolsWebContents The docked DevTools frontend, or null.
++     * @param inspectedBounds The bounds of the tab's contents within the DevTools frontend.
++     */
++    protected void setDockedDevTools(
++            @Nullable WebContents devToolsWebContents, @Nullable Rect inspectedBounds) {
++        mModel.set(LayoutTab.DOCKED_DEVTOOLS_WEB_CONTENTS, devToolsWebContents);
++        mModel.set(LayoutTab.DOCKED_DEVTOOLS_INSPECTED_BOUNDS, inspectedBounds);
++    }
++
+     @Override
+     @SuppressWarnings("NullAway")
+     public void destroy() {
+--- a/chrome/android/java/src/org/chromium/chrome/browser/compositor/scene_layer/StaticTabSceneLayer.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/compositor/scene_layer/StaticTabSceneLayer.java
+@@ -4,9 +4,12 @@
+ 
+ package org.chromium.chrome.browser.compositor.scene_layer;
+ 
++import android.graphics.Rect;
++
+ import androidx.annotation.VisibleForTesting;
+ 
+ import org.jni_zero.JNINamespace;
++import org.jni_zero.JniType;
+ import org.jni_zero.NativeMethods;
+ 
+ import org.chromium.build.annotations.NullMarked;
+@@ -16,6 +19,7 @@ import org.chromium.chrome.browser.compo
+ import org.chromium.chrome.browser.layouts.scene_layer.SceneLayer;
+ import org.chromium.chrome.browser.tab.Tab;
+ import org.chromium.chrome.browser.tab_ui.TabContentManager;
++import org.chromium.content_public.browser.WebContents;
+ import org.chromium.ui.modelutil.PropertyKey;
+ import org.chromium.ui.modelutil.PropertyModel;
+ 
+@@ -56,6 +60,25 @@ public class StaticTabSceneLayer extends
+                 model.get(LayoutTab.CONTENT_OFFSET_Y)
+                         + model.get(LayoutTab.RENDER_Y) * LayoutTab.sDpToPx;
+ 
++        // Docked DevTools cover the content area, with the tab's contents placed on top of them.
++        WebContents devToolsWebContents = model.get(LayoutTab.DOCKED_DEVTOOLS_WEB_CONTENTS);
++        Rect inspectedBounds = model.get(LayoutTab.DOCKED_DEVTOOLS_INSPECTED_BOUNDS);
++        StaticTabSceneLayerJni.get()
++                .updateDockedDevToolsLayer(
++                        mNativePtr,
++                        devToolsWebContents,
++                        x,
++                        y,
++                        model.get(LayoutTab.CONTENT_OFFSET_TAG));
++        int clipWidth = -1;
++        int clipHeight = -1;
++        if (devToolsWebContents != null && inspectedBounds != null) {
++            x += inspectedBounds.left;
++            y += inspectedBounds.top;
++            clipWidth = inspectedBounds.width();
++            clipHeight = inspectedBounds.height();
++        }
++
+         // Check isActiveLayout to prevent pushing a TAB_ID for a static layer that may already be
+         // invalidated by the next layout.
+         StaticTabSceneLayerJni.get()
+@@ -68,6 +91,8 @@ public class StaticTabSceneLayer extends
+                         model.get(LayoutTab.BACKGROUND_COLOR),
+                         x,
+                         y,
++                        clipWidth,
++                        clipHeight,
+                         model.get(LayoutTab.CONTENT_OFFSET_TAG));
+     }
+ 
+@@ -106,8 +131,17 @@ public class StaticTabSceneLayer extends
+                 int backgroundColor,
+                 float x,
+                 float y,
++                int clipWidth,
++                int clipHeight,
+                 @Nullable OffsetTag contentLayerOffsetToken);
+ 
++        void updateDockedDevToolsLayer(
++                long nativeStaticTabSceneLayer,
++                @JniType("content::WebContents*") @Nullable WebContents devToolsWebContents,
++                float x,
++                float y,
++                @Nullable OffsetTag offsetTag);
++
+         void setTabContentManager(
+                 long nativeStaticTabSceneLayer, TabContentManager tabContentManager);
+     }
+--- a/chrome/browser/android/compositor/scene_layer/static_tab_scene_layer.cc
++++ b/chrome/browser/android/compositor/scene_layer/static_tab_scene_layer.cc
+@@ -13,8 +13,10 @@
+ #include "chrome/browser/android/compositor/layer_title_cache.h"
+ #include "chrome/browser/android/compositor/tab_content_manager.h"
+ #include "components/viz/common/quads/offset_tag.h"
++#include "content/public/browser/web_contents.h"
+ #include "third_party/skia/include/core/SkColor.h"
+ #include "ui/android/resources/resource_manager_impl.h"
++#include "ui/android/view_android.h"
+ 
+ // Must come after all headers that specialize FromJniType() / ToJniType().
+ #include "chrome/android/chrome_jni_headers/StaticTabSceneLayer_jni.h"
+@@ -67,6 +69,8 @@ void StaticTabSceneLayer::UpdateTabLayer
+                                          int32_t default_background_color,
+                                          float x,
+                                          float y,
++                                         int32_t clip_width,
++                                         int32_t clip_height,
+                                          const JavaRef<jobject>& joffset_tag) {
+   DCHECK(tab_content_manager_)
+       << "TabContentManager must be set before updating the layer";
+@@ -90,11 +94,15 @@ void StaticTabSceneLayer::UpdateTabLayer
+     }
+   }
+ 
++  // The tab's contents are clipped when DevTools are docked into the tab, as
++  // they may be smaller than the content area while drawing beyond their
++  // bounds.
++  bool should_clip = clip_width >= 0 && clip_height >= 0;
+   content_layer_->SetProperties(
+       id, can_use_live_layer, /* static_to_view_blend= */ 0.f,
+       /* should_override_content_alpha= */ false,
+-      /* content_alpha_override= */ 1.f, /* saturation= */ 1.f,
+-      /* should_clip= */ false, /* clip= */ gfx::Rect());
++      /* content_alpha_override= */ 1.f, /* saturation= */ 1.f, should_clip,
++      should_clip ? gfx::Rect(clip_width, clip_height) : gfx::Rect());
+ 
+   content_layer_->layer()->SetPosition(gfx::PointF(x, y));
+   content_layer_->layer()->SetIsDrawable(true);
+@@ -103,6 +111,37 @@ void StaticTabSceneLayer::UpdateTabLayer
+   content_layer_->layer()->SetOffsetTag(tag);
+ }
+ 
++void StaticTabSceneLayer::UpdateDockedDevToolsLayer(
++    JNIEnv* env,
++    content::WebContents* devtools_web_contents,
++    float x,
++    float y,
++    const JavaRef<jobject>& joffset_tag) {
++  scoped_refptr<cc::slim::Layer> devtools_layer;
++  if (devtools_web_contents && devtools_web_contents->GetNativeView()) {
++    devtools_layer = devtools_web_contents->GetNativeView()->GetLayer();
++  }
++
++  if (docked_devtools_layer_ != devtools_layer) {
++    if (docked_devtools_layer_ &&
++        docked_devtools_layer_->parent() == layer_.get()) {
++      docked_devtools_layer_->RemoveFromParent();
++    }
++    docked_devtools_layer_ = devtools_layer;
++    if (docked_devtools_layer_) {
++      // Behind the tab's contents.
++      layer_->InsertChild(docked_devtools_layer_, 0);
++    }
++  }
++  if (!docked_devtools_layer_) {
++    return;
++  }
++
++  docked_devtools_layer_->SetPosition(gfx::PointF(x, y));
++  docked_devtools_layer_->SetOffsetTag(
++      cc::android::FromJavaOffsetTag(env, joffset_tag));
++}
++
+ void StaticTabSceneLayer::SetTabContentManager(
+     JNIEnv* env,
+     const base::android::JavaRef<jobject>& jtab_content_manager) {
+--- a/chrome/browser/android/compositor/scene_layer/static_tab_scene_layer.h
++++ b/chrome/browser/android/compositor/scene_layer/static_tab_scene_layer.h
+@@ -13,6 +13,14 @@
+ #include "base/memory/scoped_refptr.h"
+ #include "chrome/browser/ui/android/layouts/scene_layer.h"
+ 
++namespace cc::slim {
++class Layer;
++}
++
++namespace content {
++class WebContents;
++}
++
+ namespace android {
+ 
+ class ContentLayer;
+@@ -31,21 +39,34 @@ class StaticTabSceneLayer : public Scene
+   bool ShouldShowBackground() override;
+   SkColor GetBackgroundColor() override;
+ 
+-  // Update StaticTabSceneLayer with the new parameters.
++  // Update StaticTabSceneLayer with the new parameters. Unless negative,
++  // |clip_width| and |clip_height| clip the tab's contents.
+   void UpdateTabLayer(JNIEnv* env,
+                       int32_t id,
+                       bool can_use_live_layer,
+                       int32_t default_background_color,
+                       float x,
+                       float y,
++                      int32_t clip_width,
++                      int32_t clip_height,
+                       const base::android::JavaRef<jobject>& joffset_tag);
+ 
++  // Shows |devtools_web_contents| at (|x|, |y|) behind the tab's contents, or
++  // removes the docked DevTools layer if null.
++  void UpdateDockedDevToolsLayer(
++      JNIEnv* env,
++      content::WebContents* devtools_web_contents,
++      float x,
++      float y,
++      const base::android::JavaRef<jobject>& joffset_tag);
++
+   void SetTabContentManager(
+       JNIEnv* env,
+       const base::android::JavaRef<jobject>& jtab_content_manager);
+ 
+  private:
+   scoped_refptr<android::ContentLayer> content_layer_;
++  scoped_refptr<cc::slim::Layer> docked_devtools_layer_;
+ 
+   raw_ptr<TabContentManager> tab_content_manager_;
+   int background_color_;

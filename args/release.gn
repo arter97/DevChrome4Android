@@ -1,0 +1,2 @@
+# Plain release build without LTO/PGO: much faster incremental rebuilds, meant
+# for iterating on patches.

@@ -1,0 +1,4 @@
+#!/bin/bash
+# quilt wrapper operating on src/ with the project quiltrc.
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT/src" && exec quilt --quiltrc "$ROOT/quiltrc" "$@"
