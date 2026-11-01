@@ -3,4 +3,5 @@ android-devtools/0002-dock-devtools-into-the-inspected-tab.patch
 android-devtools/0003-devtools-frontend-support-hosts-without-undocking.patch
 android-devtools/0004-host-docked-devtools-in-the-tab-content-area.patch
 android-devtools/0005-show-developer-tools-in-the-app-menu.patch
+android-devtools/0006-backport-input-view-origin-for-touch-transferred-to-viz.patch
 branding/0001-rename-app-to-devchrome.patch

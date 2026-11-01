@@ -1,0 +1,66 @@
+Description: Backport: let embedders set the input view origin for Viz input
+ With InputOnViz (Android 16+), touch sequences transferred to Viz arrive in
+ compositor surface coordinates, and EventForwarder's offset assumed the
+ container view sits at the surface origin. This adds
+ setContainerViewOriginInCompositorSurface() so embedders can account for
+ container views placed elsewhere.
+ .
+ Only the EventForwarder.java part of the upstream commit (which also adds
+ the WebUI tab strip) is backported. Drop this patch when updating to a
+ Chromium version that contains it.
+Origin: upstream, https://chromium.googlesource.com/chromium/src/+/866a2a0d07225e707884a2476acd8a841f3fe5dc
+Applied-Upstream: 866a2a0d07225e707884a2476acd8a841f3fe5dc (refs/heads/main@{#1718958})
+
+--- a/ui/android/java/src/org/chromium/ui/base/EventForwarder.java
++++ b/ui/android/java/src/org/chromium/ui/base/EventForwarder.java
+@@ -68,6 +68,10 @@ public class EventForwarder {
+     private float mCurrentTouchOffsetX;
+     private float mCurrentTouchOffsetY;
+ 
++    // Origin of the container view in the compositor surface, in pixels.
++    private float mContainerViewOriginX;
++    private float mContainerViewOriginY;
++
+     // Offset for the drag events that's dispatching through other views.
+     private float mDragDispatchingOffsetX;
+     private float mDragDispatchingOffsetY;
+@@ -272,14 +276,17 @@ public class EventForwarder {
+         return false;
+     }
+ 
++    // Returns the offset that maps compositor surface coordinates to web contents coordinates.
++    // Used when a touch sequence is transferred to Viz, which receives events in compositor surface
++    // coordinates rather than in container view coordinates.
+     @CalledByNative
+     private float getWebContentsOffsetXInWindow() {
+-        return mCurrentTouchOffsetX;
++        return mCurrentTouchOffsetX - mContainerViewOriginX;
+     }
+ 
+     @CalledByNative
+     private float getWebContentsOffsetYInWindow() {
+-        return mCurrentTouchOffsetY;
++        return mCurrentTouchOffsetY - mContainerViewOriginY;
+     }
+ 
+     private boolean sendTouchEvent(MotionEvent event, boolean isTouchHandleEvent) {
+@@ -402,6 +409,19 @@ public class EventForwarder {
+     }
+ 
+     /**
++     * Sets the origin of the container view in the compositor surface. Only affects touch sequences
++     * transferred to Viz, which receive events in compositor surface coordinates. Needed when the
++     * container view isn't placed at the origin of the compositor surface.
++     *
++     * @param x The X origin in pixels.
++     * @param y The Y origin in pixels.
++     */
++    public void setContainerViewOriginInCompositorSurface(float x, float y) {
++        mContainerViewOriginX = x;
++        mContainerViewOriginY = y;
++    }
++
++    /**
+      * Creates a new motion event differed from the given event by current touch offset
+      * if the offset is not zero.
+      * @param src Source motion event.
