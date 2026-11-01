@@ -1,0 +1,24 @@
+Description: Set the docked DevTools origin for touch transferred to Viz
+ The docked DevTools content view is not at the compositor surface origin.
+ On Android 16+ with InputOnViz, touch sequences transferred to Viz arrive
+ in compositor surface coordinates, so without the view's origin Viz offset
+ DevTools touches by the view's position (the toolbar height, plus the side UI
+ width). Pass it through EventForwarder#setContainerViewOriginInCompositorSurface
+ (see the backport in 0006).
+Author: Claude Opus 5.5 <noreply@anthropic.com>
+Forwarded: not-needed
+
+--- a/chrome/android/java/src/org/chromium/chrome/browser/compositor/DockedDevToolsHost.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/compositor/DockedDevToolsHost.java
+@@ -239,6 +239,11 @@ class DockedDevToolsHost implements DevT
+             params.topMargin = top;
+             contentView.setLayoutParams(params);
+         }
++        // Touch sequences transferred to Viz arrive in compositor surface coordinates, which
++        // match this holder's. Let Viz account for where the DevTools content view is placed.
++        devToolsWebContents
++                .getEventForwarder()
++                .setContainerViewOriginInCompositorSurface(left, top);
+         mHolder.getCompositorView()
+                 .onPhysicalBackingSizeChanged(devToolsWebContents, width, height);
+         devToolsWebContents.setSize(width, height);

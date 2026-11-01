@@ -68,6 +68,7 @@ scripts/quilt header -e               # edit the DEP-3 description
 | 0004 | Draw DevTools behind the tab (`StaticTabSceneLayer`), resize/offset the tab to the inspected-page bounds reported by the frontend, route input (`DockedDevToolsHost`) |
 | 0005 | Show "Developer tools" as a top-level app menu item |
 | 0006 | Backport of upstream `EventForwarder.setContainerViewOriginInCompositorSurface()` (touch input transferred to Viz) |
+| 0007 | Pass the docked DevTools view origin to that API (fixes DevTools touch offsets on Android 16+) |
 | branding/0001 | Rename the app (launcher label, widget titles) to DevChrome |
 
 Dock sides and the device toolbar are laid out by the DevTools frontend itself
